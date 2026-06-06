@@ -1,11 +1,16 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
-from typing import Optional
+from fastapi.responses import Response
+from typing import Optional, Literal
 from database import supabase
 from schemas.schema import (
     LaporanBaru,
     UpdateStatusLaporan,
 )
 from routers.auth import get_current_user
+from fpdf import FPDF
+from io import BytesIO
+from datetime import datetime
+import httpx
 import uuid
 import logging
 
@@ -256,4 +261,214 @@ async def upload_foto(
         logger.error(f"Upload foto gagal: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, detail="Terjadi kesalahan saat mengunggah foto"
+        )
+
+
+# 6. Jalur untuk Export Laporan ke PDF - HANYA ADMIN
+@router.get("/export-pdf")
+async def export_laporan_pdf(
+    status: Literal["Menunggu", "Sedang Diperbaiki", "Selesai"] = "Menunggu",
+    current_user=Depends(get_current_user),
+):
+    """
+    Export laporan ke file PDF berdasarkan status.
+    Hanya bisa diakses oleh Admin.
+    Filter status: Menunggu, Sedang Diperbaiki, atau Selesai.
+    """
+    try:
+        # 1. Cek apakah user adalah admin
+        user_id = current_user.user.id
+        cek_admin = supabase.table("users").select("role").eq("id", user_id).execute()
+
+        if len(cek_admin.data) == 0 or cek_admin.data[0]["role"] != "admin":
+            raise HTTPException(
+                status_code=403,
+                detail="Akses Ditolak! Hanya Admin yang bisa mengekspor laporan.",
+            )
+
+        # 2. Ambil data laporan berdasarkan status
+        laporan_list = (
+            supabase.table("reports")
+            .select("*, categories(nama_kategori), users(nama_lengkap)")
+            .eq("status", status)
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        if len(laporan_list.data) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tidak ada laporan dengan status '{status}'.",
+            )
+
+        # 3. Buat dokumen PDF
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=20)
+
+        # === HALAMAN SAMPUL ===
+        pdf.add_page()
+
+        # Judul utama
+        pdf.set_font("Helvetica", "B", 20)
+        pdf.ln(30)
+        pdf.cell(0, 12, "LAPORAN FASILITAS UMUM", ln=True, align="C")
+        pdf.cell(0, 12, "KOTA PEKANBARU", ln=True, align="C")
+        pdf.ln(10)
+
+        # Garis pemisah
+        pdf.set_draw_color(50, 50, 50)
+        pdf.set_line_width(0.5)
+        pdf.line(40, pdf.get_y(), 170, pdf.get_y())
+        pdf.ln(10)
+
+        # Info status dan tanggal
+        pdf.set_font("Helvetica", "", 12)
+        pdf.cell(0, 8, f"Status Laporan: {status}", ln=True, align="C")
+        pdf.cell(
+            0,
+            8,
+            f"Tanggal Cetak: {datetime.now().strftime('%d-%m-%Y, %H:%M WIB')}",
+            ln=True,
+            align="C",
+        )
+        pdf.cell(
+            0, 8, f"Total Laporan: {len(laporan_list.data)}", ln=True, align="C"
+        )
+        pdf.ln(15)
+
+        # Garis pemisah bawah
+        pdf.line(40, pdf.get_y(), 170, pdf.get_y())
+        pdf.ln(5)
+
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.cell(
+            0,
+            8,
+            "Dokumen ini digenerate otomatis oleh sistem Backend API FaCare",
+            ln=True,
+            align="C",
+        )
+
+        # === HALAMAN ISI: DETAIL SETIAP LAPORAN ===
+        for i, laporan in enumerate(laporan_list.data, 1):
+            pdf.add_page()
+
+            # Ambil data dari relasi tabel
+            kategori = (
+                laporan.get("categories", {}).get("nama_kategori", "Tidak diketahui")
+                if laporan.get("categories")
+                else "Tidak diketahui"
+            )
+            pelapor = (
+                laporan.get("users", {}).get("nama_lengkap", "Anonim")
+                if laporan.get("users")
+                else "Anonim"
+            )
+            deskripsi = laporan.get("deskripsi", "-")
+            latitude = laporan.get("latitude", 0)
+            longitude = laporan.get("longitude", 0)
+            foto_url = laporan.get("foto_url", None)
+            created_at = laporan.get("created_at", "-")
+            jumlah_upvote = laporan.get("jumlah_upvote", 0)
+
+            # Header laporan
+            pdf.set_fill_color(44, 62, 80)
+            pdf.set_text_color(255, 255, 255)
+            pdf.set_font("Helvetica", "B", 14)
+            pdf.cell(0, 12, f"  Laporan #{i}", ln=True, fill=True)
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln(5)
+
+            # Detail laporan dalam format tabel
+            pdf.set_font("Helvetica", "B", 10)
+            col_label = 45
+            col_value = 0
+
+            # Baris: Kategori
+            pdf.cell(col_label, 8, "Kategori", border=1)
+            pdf.set_font("Helvetica", "", 10)
+            pdf.cell(col_value, 8, f"  {kategori}", border=1, ln=True)
+
+            # Baris: Pelapor
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(col_label, 8, "Pelapor", border=1)
+            pdf.set_font("Helvetica", "", 10)
+            pdf.cell(col_value, 8, f"  {pelapor}", border=1, ln=True)
+
+            # Baris: Koordinat
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(col_label, 8, "Koordinat", border=1)
+            pdf.set_font("Helvetica", "", 10)
+            pdf.cell(col_value, 8, f"  {latitude}, {longitude}", border=1, ln=True)
+
+            # Baris: Status
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(col_label, 8, "Status", border=1)
+            pdf.set_font("Helvetica", "", 10)
+            pdf.cell(col_value, 8, f"  {status}", border=1, ln=True)
+
+            # Baris: Jumlah Upvote
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(col_label, 8, "Jumlah Upvote", border=1)
+            pdf.set_font("Helvetica", "", 10)
+            pdf.cell(col_value, 8, f"  {jumlah_upvote}", border=1, ln=True)
+
+            # Baris: Tanggal Lapor
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(col_label, 8, "Tanggal Lapor", border=1)
+            pdf.set_font("Helvetica", "", 10)
+            tanggal_format = str(created_at)[:10] if created_at else "-"
+            pdf.cell(col_value, 8, f"  {tanggal_format}", border=1, ln=True)
+
+            pdf.ln(5)
+
+            # Deskripsi
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(0, 8, "Deskripsi:", ln=True)
+            pdf.set_font("Helvetica", "", 10)
+            pdf.multi_cell(0, 6, deskripsi)
+            pdf.ln(5)
+
+            # Foto laporan (download dan embed ke PDF)
+            if foto_url:
+                try:
+                    pdf.set_font("Helvetica", "B", 10)
+                    pdf.cell(0, 8, "Foto Laporan:", ln=True)
+                    async with httpx.AsyncClient() as client:
+                        img_response = await client.get(foto_url, timeout=10)
+                        if img_response.status_code == 200:
+                            img_bytes = BytesIO(img_response.content)
+                            pdf.image(img_bytes, x=10, w=90)
+                            pdf.ln(5)
+                        else:
+                            pdf.set_font("Helvetica", "I", 9)
+                            pdf.cell(0, 7, "[Foto tidak dapat dimuat]", ln=True)
+                except Exception:
+                    pdf.set_font("Helvetica", "I", 9)
+                    pdf.cell(0, 7, "[Foto tidak dapat dimuat]", ln=True)
+
+        # 4. Generate output PDF dan kirim sebagai response
+        pdf_output = pdf.output()
+
+        # Buat nama file yang rapi
+        status_clean = status.lower().replace(" ", "_")
+        filename = f"laporan_{status_clean}_{datetime.now().strftime('%Y%m%d')}.pdf"
+
+        logger.info(
+            f"PDF berhasil digenerate: {filename} ({len(laporan_list.data)} laporan)"
+        )
+
+        return Response(
+            content=bytes(pdf_output),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Export PDF gagal: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Terjadi kesalahan saat mengekspor laporan ke PDF",
         )
