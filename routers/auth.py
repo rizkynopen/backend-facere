@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 SECRET_KEY = os.getenv("SUPABASE_KEY")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")  # URL Frontend
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
@@ -313,9 +314,7 @@ async def forgot_password(data: ForgotPasswordRequest):
         supabase.auth.reset_password_for_email(
             data.email,
             options={
-                "redirect_to": "http://localhost:3000/reset-password"
-                # Ganti dengan URL frontend production nanti:
-                # "redirect_to": "https://domain-kamu.com/reset-password"
+                "redirect_to": f"{FRONTEND_URL}/reset-password"
             },
         )
 
