@@ -53,7 +53,13 @@ def register(user_data: RegisterUser):
     try:
         # a. Mendaftarkan email & password ke sistem Auth bawaan Supabase
         auth_response = supabase.auth.sign_up(
-            {"email": user_data.email, "password": user_data.password}
+            {
+                "email": user_data.email,
+                "password": user_data.password,
+                "options": {
+                    "email_redirect_to": f"{FRONTEND_URL}/verify-email"
+                },
+            }
         )
 
         # b. Mengambil ID unik yang baru saja dibuat Supabase
